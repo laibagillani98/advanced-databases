@@ -8,7 +8,7 @@ import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
-
+import java.sql.*;
 /**
  * 
  * @author Martin Schaeler martin.schaeler@plus.ac.at
@@ -41,11 +41,16 @@ public class Blocking {
 	int num_tuple = 50000;
 	double max_value = 50.0f;
 	AtomicInteger tasks_finished;
-	
+	AtomicInteger deadlocks = new AtomicInteger(0);
+	AtomicInteger other_failures = new AtomicInteger(0);
+
 	public Blocking(){
 		tasks_finished = new AtomicInteger(0);
+		AtomicInteger tasks_finished;
+		AtomicInteger deadlocks = new AtomicInteger(0);
+		AtomicInteger other_failures = new AtomicInteger(0);
 	}
-	
+
 	void executeSQL(String sql, Connection con){
 		java.sql.Statement stmt;
 		try {
@@ -116,6 +121,12 @@ public class Blocking {
 		}
 		stop = System.currentTimeMillis();
 		System.out.println("[DONE] Task execution after roughly "+(stop-start)+" ms finished: "+b.tasks_finished+" of "+num_taks);
+		System.out.println("\n===== EXECUTION SUMMARY =====");
+		System.out.println("Total tasks: " + num_taks);
+		System.out.println("Completed: " + b.tasks_finished.get());
+		System.out.println("Deadlocks: " + b.deadlocks.get());
+		System.out.println("Other SQL failures: " + b.other_failures.get());
+		System.out.println("Execution time: " + (stop-start) + " ms");
 	}
 	
 	/**
@@ -162,6 +173,11 @@ public class Blocking {
 				con.close();
 				System.out.println("Done task "+task+". I am finisher number "+num_finished);
 			} catch (SQLException e) {
+				if ("40P01".equals(e.getSQLState())) {
+					deadlocks.incrementAndGet();
+				} else {
+					other_failures.incrementAndGet();
+				}
 				System.err.println("Task "+task+" "+e.getMessage());
 			}
 		}	
