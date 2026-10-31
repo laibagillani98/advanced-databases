@@ -107,7 +107,7 @@ public class NoLiveLocks {
         executor.shutdownNow();
         double stop = System.currentTimeMillis();
 
-        System.out.println("\n===== EXECUTION SUMMARY (PRIORITY QUEUE + RANDOMIZED BACKOFF) =====");
+        System.out.println("\nEXECUTION SUMMARY (PRIORITY QUEUE + RANDOMISED BACKOFF)");
         System.out.println("Total tasks: " + num_taks);
         System.out.println("Completed: " + b.tasks_finished.get() + " of " + num_taks);
         System.out.println("Deadlocks caught: " + b.deadlocks.get());
