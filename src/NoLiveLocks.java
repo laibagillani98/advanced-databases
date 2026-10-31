@@ -12,12 +12,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * To prevent livelocks and starvation, use a PriorityQueue
- * (tasks with more retries have a higher priority).
+ * NoLiveLocks: Combines Priority Queue with Randomised Backoff
  */
 public class NoLiveLocks {
-    public static int num_taks = 30;
-    public static int num_queries_per_task = 3;
+    public static int num_taks = 100;
+    public static int num_queries_per_task = 10;
 
     Connection con;
     Random rand = new Random(123456);
@@ -29,11 +28,9 @@ public class NoLiveLocks {
     AtomicInteger other_failures = new AtomicInteger(0);
     AtomicInteger total_retries = new AtomicInteger(0);
 
-    // Make taskQueue accessible to inner Blocker class for re-queuing
     BlockingQueue<Runnable> taskQueue;
 
     public NoLiveLocks() {
-        // Priority blocking queue to enforce fair scheduling based on retry attempts (highest attempts first)
         this.taskQueue = new PriorityBlockingQueue<>(
                 num_taks,
                 Comparator.comparingInt((Runnable r) -> ((Blocker) r).attempts).reversed()
@@ -89,7 +86,6 @@ public class NoLiveLocks {
             b.taskQueue.add(b.new Blocker(task));
         }
 
-        // Custom ThreadPoolExecutor using PriorityBlockingQueue
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
                 4, 4,
                 0L, TimeUnit.MILLISECONDS,
@@ -99,7 +95,6 @@ public class NoLiveLocks {
         double start = System.currentTimeMillis();
         executor.prestartAllCoreThreads();
 
-        // Feed the executor until all tasks finish
         while (b.tasks_finished.get() < num_taks) {
             try {
                 Thread.sleep(50);
@@ -114,9 +109,8 @@ public class NoLiveLocks {
         System.out.println("\nEXECUTION SUMMARY");
         System.out.println("Total tasks: " + num_taks);
         System.out.println("Completed: " + b.tasks_finished.get() + " of " + num_taks);
-        System.out.println("Deadlocks: " + b.deadlocks.get());
-        System.out.println("Retries: " + b.total_retries.get());
-        System.out.println("Other SQL failures: " + b.other_failures.get());
+        System.out.println("Deadlocks caught: " + b.deadlocks.get());
+        System.out.println("Total retries: " + b.total_retries.get());
         System.out.println("Execution time: " + (stop - start) + " ms");
     }
 
@@ -124,7 +118,7 @@ public class NoLiveLocks {
         final int task;
         final double[] start_range;
         final double[] stop_range;
-        int attempts = 0; // Track attempts for priority ordering
+        int attempts = 0;
 
         public Blocker(int id) {
             this.task = id;
@@ -162,28 +156,33 @@ public class NoLiveLocks {
 
                 con.commit();
                 int num_finished = tasks_finished.incrementAndGet();
-                if (attempts > 0) {
-                    System.out.println("Done task " + task + " after " + attempts + " priority retries. Finisher #" + num_finished);
-                } else {
-                    System.out.println("Done task " + task + ". Finisher #" + num_finished);
-                }
+                System.out.println("Done task " + task + " (attempts: " + attempts + "). Finisher #" + num_finished);
             } catch (SQLException e) {
-                if (con != null) {
-                    try { con.rollback(); } catch (SQLException rollbackEx) {}
-                }
+                if (con != null) { try { con.rollback(); } catch (SQLException ex) {} }
 
                 if ("40P01".equals(e.getSQLState())) {
                     deadlocks.incrementAndGet();
                     total_retries.incrementAndGet();
-                    attempts++; // Increase priority weight
+                    attempts++;
 
-                    System.err.println("Task " + task + " deadlocked (40P01). Re-queueing with higher priority (attempt " + attempts + ")");
+                    //Randomised backoff
+                    int minSleep = 10;
+                    int maxSleep = 200;
+                    long sleepTime = minSleep + rand.nextInt(maxSleep - minSleep);
 
-                    // Re-insert task back into the priority queue with its increased attempt counter
+                    try {
+                        System.err.println("Task " + task + " deadlocked. Randomized sleep: " + sleepTime + "ms");
+                        Thread.sleep(sleepTime);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+
+                    // Re-enqueue back into the priority queue
                     taskQueue.offer(this);
                 } else {
                     other_failures.incrementAndGet();
-                    System.err.println("Task " + task + " encountered non-deadlock error: " + e.getMessage());
+                    System.err.println("Task " + task + " error: " + e.getMessage());
                 }
             } finally {
                 if (ps != null) { try { ps.close(); } catch (SQLException ignored) {} }
