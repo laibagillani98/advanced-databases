@@ -12,7 +12,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * NoLiveLocks: Combines Priority Queue with Randomised Backoff
+ * Final Optimised Solution.
+ * Combines Priority Scheduling (fairness) with Randomised Backoff (contention relief).
  */
 public class NoLiveLocks {
     public static int num_taks = 100;
@@ -79,7 +80,7 @@ public class NoLiveLocks {
     }
 
     public static void main(String[] args) {
-        NoLiveLocks b = new NoLiveLocks();
+        NoLiveLocks3 b = new NoLiveLocks3();
         b.cerateDB();
 
         for (int task = 0; task < num_taks; task++) {
@@ -106,11 +107,12 @@ public class NoLiveLocks {
         executor.shutdownNow();
         double stop = System.currentTimeMillis();
 
-        System.out.println("\nEXECUTION SUMMARY");
+        System.out.println("\n===== EXECUTION SUMMARY (PRIORITY QUEUE + RANDOMIZED BACKOFF) =====");
         System.out.println("Total tasks: " + num_taks);
         System.out.println("Completed: " + b.tasks_finished.get() + " of " + num_taks);
         System.out.println("Deadlocks caught: " + b.deadlocks.get());
         System.out.println("Total retries: " + b.total_retries.get());
+        System.out.println("Other SQL failures: " + b.other_failures.get());
         System.out.println("Execution time: " + (stop - start) + " ms");
     }
 
@@ -156,22 +158,28 @@ public class NoLiveLocks {
 
                 con.commit();
                 int num_finished = tasks_finished.incrementAndGet();
-                System.out.println("Done task " + task + " (attempts: " + attempts + "). Finisher #" + num_finished);
+                if (attempts > 0) {
+                    System.out.println("Done task " + task + " after " + attempts + " retries. Finisher #" + num_finished);
+                } else {
+                    System.out.println("Done task " + task + ". Finisher #" + num_finished);
+                }
             } catch (SQLException e) {
-                if (con != null) { try { con.rollback(); } catch (SQLException ex) {} }
+                if (con != null) {
+                    try { con.rollback(); } catch (SQLException rollbackEx) {}
+                }
 
                 if ("40P01".equals(e.getSQLState())) {
                     deadlocks.incrementAndGet();
                     total_retries.incrementAndGet();
                     attempts++;
 
-                    //Randomised backoff
+                    // Randomized Backoff (10ms to 200ms sleep)
                     int minSleep = 10;
                     int maxSleep = 200;
                     long sleepTime = minSleep + rand.nextInt(maxSleep - minSleep);
 
                     try {
-                        System.err.println("Task " + task + " deadlocked. Randomized sleep: " + sleepTime + "ms");
+                        System.err.println("Task " + task + " deadlocked (40P01). Randomized sleep: " + sleepTime + "ms (attempt " + attempts + ")");
                         Thread.sleep(sleepTime);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
