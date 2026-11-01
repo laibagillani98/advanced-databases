@@ -3,21 +3,22 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.Comparator;
+import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.Future;
+import java.util.concurrent.ExecutionException;
 import java.util.Random;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Final Optimised Solution.
- * Combines Priority Scheduling (fairness) with Randomised Backoff (contention relief).
- */
 public class NoLiveLocks {
-    public static int num_taks = 100;
-    public static int num_queries_per_task = 10;
+    public static int num_tasks = 30;
+    public static int num_queries_per_task = 3;
+
+
 
     Connection con;
     Random rand = new Random(123456);
@@ -28,15 +29,12 @@ public class NoLiveLocks {
     AtomicInteger deadlocks = new AtomicInteger(0);
     AtomicInteger other_failures = new AtomicInteger(0);
     AtomicInteger total_retries = new AtomicInteger(0);
-
-    BlockingQueue<Runnable> taskQueue;
+    AtomicInteger max_retries = new AtomicInteger(0);
+    AtomicInteger exclusive_runs = new AtomicInteger(0);
+    static final int THRESHOLD = Integer.getInteger("threshold", 3);
 
     public NoLiveLocks() {
-        this.taskQueue = new PriorityBlockingQueue<>(
-                num_taks,
-                Comparator.comparingInt((Runnable r) -> ((Blocker) r).attempts).reversed()
-                        .thenComparingInt(r -> ((Blocker) r).task)
-        );
+        // Class fields already initialised above
     }
 
     void executeSQL(String sql, Connection con) {
@@ -80,47 +78,77 @@ public class NoLiveLocks {
     }
 
     public static void main(String[] args) {
-        NoLiveLocks3 b = new NoLiveLocks3();
+        NoLiveLocks b = new NoLiveLocks();
         b.cerateDB();
 
+        ArrayList<NoLiveLocks.Blocker> my_tasks = new ArrayList<>(num_taks);
         for (int task = 0; task < num_taks; task++) {
-            b.taskQueue.add(b.new Blocker(task));
+            my_tasks.add(b.new Blocker(task));
         }
 
-        ThreadPoolExecutor executor = new ThreadPoolExecutor(
-                4, 4,
-                0L, TimeUnit.MILLISECONDS,
-                b.taskQueue
-        );
-
+        ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(4);
+        CompletionService<AttemptResult> results = new ExecutorCompletionService<>(executor);
+        ArrayDeque<Blocker> waiting = new ArrayDeque<>(my_tasks);
+        boolean exclusiveActive = false;
+        int running = 0;
+        int processed = 0;
         double start = System.currentTimeMillis();
-        executor.prestartAllCoreThreads();
-
-        while (b.tasks_finished.get() < num_taks) {
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                break;
+        try {
+            while (processed < num_taks) {
+                // Dispatch tasks in FIFO order. Each submitted task performs one attempt.
+                while (running < 4 && !waiting.isEmpty()) {
+                    // If retry attempt escalated, task must run alone. 
+                    if (waiting.peekFirst().attempts >= THRESHOLD && running > 0) break;
+                    if (running > 0 && exclusiveActive) break;
+                    Blocker next = waiting.removeFirst();
+                    results.submit(() -> new AttemptResult(next, next.runAttempt()));
+                    running++;
+                    if (next.attempts >= THRESHOLD) {
+                        exclusiveActive = true;
+                        b.exclusive_runs.incrementAndGet();
+                        break;
+                    }
+                }
+                if (running == 0) throw new IllegalStateException("No runnable tasks remain");
+                AttemptResult result = results.take().get();
+                running--;
+                if (exclusiveActive && running == 0) exclusiveActive = false;
+                if (result.status == 0) {
+                    processed++;
+                } else if (result.status == 1) {
+                    result.task.attempts++;
+                    b.total_retries.incrementAndGet();
+                    b.max_retries.accumulateAndGet(result.task.attempts, Math::max);
+                    waiting.addLast(result.task);
+                } else {
+                    processed++; // Non-retryable SQL error: count as failed, not completed.
+                }
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
+        } catch (ExecutionException e) {
+            throw new RuntimeException(e.getCause());
+        } finally {
+            executor.shutdown();
         }
-
-        executor.shutdownNow();
         double stop = System.currentTimeMillis();
 
-        System.out.println("\nEXECUTION SUMMARY (PRIORITY QUEUE + RANDOMISED BACKOFF)");
+        System.out.println("\n===== EXECUTION SUMMARY =====");
         System.out.println("Total tasks: " + num_taks);
         System.out.println("Completed: " + b.tasks_finished.get() + " of " + num_taks);
         System.out.println("Deadlocks caught: " + b.deadlocks.get());
         System.out.println("Total retries: " + b.total_retries.get());
+        System.out.println("Maximum retries for one task: " + b.max_retries.get());
+        System.out.println("Exclusive runs: " + b.exclusive_runs.get());
         System.out.println("Other SQL failures: " + b.other_failures.get());
         System.out.println("Execution time: " + (stop - start) + " ms");
     }
 
-    public class Blocker implements Runnable {
+    public class Blocker {
         final int task;
         final double[] start_range;
         final double[] stop_range;
-        int attempts = 0;
 
         public Blocker(int id) {
             this.task = id;
@@ -132,21 +160,20 @@ public class NoLiveLocks {
             }
         }
 
-        @Override
-        public void run() {
+        int attempts = 0;
+
+        // Return 0 for committed, 1 for deadlock, 2 for non-retryable failure.
+        int runAttempt() {
             Connection con = null;
             PreparedStatement ps = null;
             try {
                 con = ConnectionFactory.getDefaultParameterConnection(ConnectionFactory.POSTGRESQL);
                 con.setAutoCommit(false);
                 con.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-
                 ps = con.prepareStatement(
-                        "UPDATE blocking_data SET data_value = ?, modified_by = " + task + " WHERE data_value >= ? AND data_value <= ?;",
-                        ResultSet.TYPE_SCROLL_SENSITIVE,
-                        ResultSet.CONCUR_UPDATABLE
-                );
-
+                        "UPDATE blocking_data SET data_value = ?, modified_by = " + task +
+                                " WHERE data_value >= ? AND data_value <= ?;",
+                        ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
                 int q = 0;
                 while (q < num_queries_per_task) {
                     ps.setDouble(1, (float) (rand.nextDouble() * max_value));
@@ -155,47 +182,38 @@ public class NoLiveLocks {
                     ps.execute();
                     q++;
                 }
-
                 con.commit();
-                int num_finished = tasks_finished.incrementAndGet();
-                if (attempts > 0) {
-                    System.out.println("Done task " + task + " after " + attempts + " retries. Finisher #" + num_finished);
-                } else {
-                    System.out.println("Done task " + task + ". Finisher #" + num_finished);
-                }
+                int finished = tasks_finished.incrementAndGet();
+                System.out.println("Done task " + task + " after " + attempts +
+                        " retries. Finisher #" + finished);
+                return 0;
             } catch (SQLException e) {
                 if (con != null) {
-                    try { con.rollback(); } catch (SQLException rollbackEx) {}
+                    try { con.rollback(); } catch (SQLException rollbackEx) {
+                        rollbackEx.printStackTrace();
+                    }
                 }
-
                 if ("40P01".equals(e.getSQLState())) {
                     deadlocks.incrementAndGet();
-                    total_retries.incrementAndGet();
-                    attempts++;
-
-                    // Randomized Backoff (10ms to 200ms sleep)
-                    int minSleep = 10;
-                    int maxSleep = 200;
-                    long sleepTime = minSleep + rand.nextInt(maxSleep - minSleep);
-
-                    try {
-                        System.err.println("Task " + task + " deadlocked (40P01). Randomized sleep: " + sleepTime + "ms (attempt " + attempts + ")");
-                        Thread.sleep(sleepTime);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-
-                    // Re-enqueue back into the priority queue
-                    taskQueue.offer(this);
-                } else {
-                    other_failures.incrementAndGet();
-                    System.err.println("Task " + task + " error: " + e.getMessage());
+                    System.err.println("Task " + task + " deadlocked. Returning to FIFO queue.");
+                    return 1;
                 }
+                other_failures.incrementAndGet();
+                System.err.println("Task " + task + " SQL error: " + e.getMessage());
+                return 2;
             } finally {
-                if (ps != null) { try { ps.close(); } catch (SQLException ignored) {} }
-                if (con != null) { try { con.close(); } catch (SQLException ignored) {} }
+                if (ps != null) try { ps.close(); } catch (SQLException ignored) {}
+                if (con != null) try { con.close(); } catch (SQLException ignored) {}
             }
+        }
+    }
+
+    static class AttemptResult {
+        final Blocker task;
+        final int status;
+        AttemptResult(Blocker task, int status) {
+            this.task = task;
+            this.status = status;
         }
     }
 }
