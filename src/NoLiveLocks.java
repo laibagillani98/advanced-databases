@@ -7,7 +7,6 @@ import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutorCompletionService;
-import java.util.concurrent.Future;
 import java.util.concurrent.ExecutionException;
 import java.util.Random;
 import java.util.concurrent.Executors;
@@ -81,8 +80,8 @@ public class NoLiveLocks {
         NoLiveLocks b = new NoLiveLocks();
         b.cerateDB();
 
-        ArrayList<NoLiveLocks.Blocker> my_tasks = new ArrayList<>(num_taks);
-        for (int task = 0; task < num_taks; task++) {
+        ArrayList<NoLiveLocks.Blocker> my_tasks = new ArrayList<>(num_tasks);
+        for (int task = 0; task < num_tasks; task++) {
             my_tasks.add(b.new Blocker(task));
         }
 
@@ -94,10 +93,10 @@ public class NoLiveLocks {
         int processed = 0;
         double start = System.currentTimeMillis();
         try {
-            while (processed < num_taks) {
+            while (processed < num_tasks) {
                 // Dispatch tasks in FIFO order. Each submitted task performs one attempt.
                 while (running < 4 && !waiting.isEmpty()) {
-                    // If retry attempt escalated, task must run alone. 
+                    // If retry attempt escalated, task must run alone.
                     if (waiting.peekFirst().attempts >= THRESHOLD && running > 0) break;
                     if (running > 0 && exclusiveActive) break;
                     Blocker next = waiting.removeFirst();
@@ -135,8 +134,8 @@ public class NoLiveLocks {
         double stop = System.currentTimeMillis();
 
         System.out.println("\n===== EXECUTION SUMMARY =====");
-        System.out.println("Total tasks: " + num_taks);
-        System.out.println("Completed: " + b.tasks_finished.get() + " of " + num_taks);
+        System.out.println("Total tasks: " + num_tasks);
+        System.out.println("Completed: " + b.tasks_finished.get() + " of " + num_tasks);
         System.out.println("Deadlocks caught: " + b.deadlocks.get());
         System.out.println("Total retries: " + b.total_retries.get());
         System.out.println("Maximum retries for one task: " + b.max_retries.get());
@@ -217,3 +216,4 @@ public class NoLiveLocks {
         }
     }
 }
+
