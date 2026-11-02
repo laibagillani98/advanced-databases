@@ -8,7 +8,6 @@ import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.sql.*;
 /**
  * 
  * @author Martin Schaeler martin.schaeler@plus.ac.at
@@ -46,9 +45,6 @@ public class Blocking {
 
 	public Blocking(){
 		tasks_finished = new AtomicInteger(0);
-		AtomicInteger tasks_finished;
-		AtomicInteger deadlocks = new AtomicInteger(0);
-		AtomicInteger other_failures = new AtomicInteger(0);
 	}
 
 	void executeSQL(String sql, Connection con){
